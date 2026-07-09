@@ -4,3 +4,43 @@ The program is designed to estimate the movement of an **LSM303DLHC sensor** con
 
 
 The logic of the program begins by establishing communication between the Raspberry Pi Pico and the LSM303DLHC sensor using the I2C protocol. After the sensor is detected, the accelerometer and magnetometer are configured by writing the required values into their control registers. The program then performs a calibration process while the sensor is kept stationary. During calibration, several hundred samples of the accelerometer are collected and averaged to determine the sensor bias, which is later removed from every measurement to improve accuracy. After calibration, the program enters an infinite loop where it continuously reads the X, Y, and Z acceleration values from the accelerometer and the X, Y, and Z magnetic field values from the magnetometer. The raw sensor values are converted into signed integers and then into acceleration values expressed in metres per second squared. Using the calibrated acceleration values, the program calculates the **roll** and **pitch** angles to determine the sensor's orientation. Next, the magnetometer readings are combined with the roll and pitch angles to calculate a **tilt-compensated heading**, ensuring that the compass direction remains correct even when the sensor is tilted. A low-pass filter is then applied to the roll, pitch, and heading values to remove sensor noise and produce stable output. The program performs gravity compensation by removing the Earth's gravitational acceleration from the measured acceleration, leaving only the actual linear acceleration caused by sensor movement. This linear acceleration is integrated over time to calculate the current velocity along the X, Y, and Z axes. The calculated velocity is then integrated again to estimate the sensor's position in three dimensions. Finally, the program computes the overall estimated distance travelled by calculating the magnitude of the X, Y, and Z position values. The heading angle is also converted into a compass direction such as North, East, South, or West for easier understanding. All the calculated values, including roll, pitch, heading, compass direction, velocity, and estimated distance, are displayed continuously in the Thonny Shell. The entire process repeats continuously until the user stops the program, while built-in error handling ensures that temporary I2C communication errors do not terminate the application.
+
+
+from machine import Pin, I2C
+import utime
+import math
+
+ACC = 0x19
+
+i2c = I2C(0, scl=Pin(1), sda=Pin(0), freq=100000)
+
+i2c.writeto_mem(ACC, 0x20, bytes([0x57]))
+i2c.writeto_mem(ACC, 0x23, bytes([0x08]))
+
+DT = 0.02
+
+vx = 0.0
+distance = 0.0
+
+def signed12(v):
+    v >>= 4
+    if v >= 2048:
+        v -= 4096
+    return v
+
+while True:
+
+    d = i2c.readfrom_mem(ACC, 0x28 | 0x80, 6)
+
+    ax = signed12((d[1] << 8) | d[0])
+
+    ax = ax * 0.00981
+
+    vx = vx + (ax * DT)
+
+    distance = distance + (vx * DT)
+
+    print("Velocity :", round(vx,3), "m/s")
+    print("Estimated Distance :", round(distance,3), "m")
+
+    utime.sleep(DT)
