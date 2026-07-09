@@ -1,0 +1,586 @@
+from machine import Pin,I2C
+import utime
+import math
+
+SDA_PIN=0
+SCL_PIN=1
+
+ACC_ADDR=0x19
+MAG_ADDR=0x1E
+
+CTRL_REG1_A=0x20
+CTRL_REG4_A=0x23
+
+CRA_REG_M=0x00
+CRB_REG_M=0x01
+MR_REG_M=0x02
+
+OUT_X_L_A=0x28
+AUTO_INC=0x80
+
+MAG_OUT_X_H=0x03
+
+DT=0.02
+ALPHA=0.20
+
+i2c=I2C(
+0,
+sda=Pin(SDA_PIN),
+scl=Pin(SCL_PIN),
+freq=100000
+)
+
+ax_bias=0
+ay_bias=0
+az_bias=0
+
+mx_bias=0
+my_bias=0
+mz_bias=0
+
+vx=0.0
+vy=0.0
+vz=0.0
+
+px=0.0
+py=0.0
+pz=0.0
+
+roll_f=0
+pitch_f=0
+heading_f=0
+
+first=True
+
+def write_reg(addr,reg,val):
+
+    for _ in range(5):
+
+        try:
+
+            i2c.writeto_mem(
+            addr,
+            reg,
+            bytes([val])
+            )
+
+            return True
+
+        except OSError:
+
+            utime.sleep_ms(50)
+
+    return False
+
+def read_reg(addr,reg,n):
+
+    for _ in range(5):
+
+        try:
+
+            return i2c.readfrom_mem(
+            addr,
+            reg,
+            n
+            )
+
+        except OSError:
+
+            utime.sleep_ms(50)
+
+    return None
+
+def sensor_init():
+
+    write_reg(
+    ACC_ADDR,
+    CTRL_REG1_A,
+    0x57
+    )
+
+    write_reg(
+    ACC_ADDR,
+    CTRL_REG4_A,
+    0x08
+    )
+
+    write_reg(
+    MAG_ADDR,
+    CRA_REG_M,
+    0x14
+    )
+
+    write_reg(
+    MAG_ADDR,
+    CRB_REG_M,
+    0x20
+    )
+
+    write_reg(
+    MAG_ADDR,
+    MR_REG_M,
+    0x00
+    )
+
+    utime.sleep_ms(200)
+
+def signed12(v):
+
+    v>>=4
+
+    if v>=2048:
+
+        v-=4096
+
+    return v
+
+def signed16(v):
+
+    if v>32767:
+
+        v-=65536
+
+    return v
+
+def read_acc():
+
+    d=read_reg(
+    ACC_ADDR,
+    OUT_X_L_A|AUTO_INC,
+    6
+    )
+
+    if d is None:
+
+        return None
+
+    x=signed12(
+    (d[1]<<8)|d[0]
+    )
+
+    y=signed12(
+    (d[3]<<8)|d[2]
+    )
+
+    z=signed12(
+    (d[5]<<8)|d[4]
+    )
+
+    return x,y,z
+
+def read_mag():
+
+    d=read_reg(
+    MAG_ADDR,
+    MAG_OUT_X_H,
+    6
+    )
+
+    if d is None:
+
+        return None
+
+    mx=signed16(
+    (d[0]<<8)|d[1]
+    )
+
+    mz=signed16(
+    (d[2]<<8)|d[3]
+    )
+
+    my=signed16(
+    (d[4]<<8)|d[5]
+    )
+
+    return mx,my,mz
+
+def calibrate(samples=300):
+
+    global ax_bias
+    global ay_bias
+    global az_bias
+
+    sx=0
+    sy=0
+    sz=0
+
+    c=0
+
+    while c<samples:
+
+        v=read_acc()
+
+        if v is None:
+
+            continue
+
+        x,y,z=v
+
+        sx+=x
+        sy+=y
+        sz+=z
+
+        c+=1
+
+        utime.sleep_ms(10)
+
+    ax_bias=sx/samples
+    ay_bias=sy/samples
+    az_bias=(sz/samples)-1024
+```python
+def get_acc():
+
+    v=read_acc()
+
+    if v is None:
+
+        return None
+
+    x,y,z=v
+
+    x=(x-ax_bias)*0.00981
+    y=(y-ay_bias)*0.00981
+    z=(z-az_bias)*0.00981
+
+    return x,y,z
+
+def get_mag():
+
+    v=read_mag()
+
+    if v is None:
+
+        return None
+
+    mx,my,mz=v
+
+    mx-=mx_bias
+    my-=my_bias
+    mz-=mz_bias
+
+    return mx,my,mz
+
+def calculate_angles(ax,ay,az):
+
+    roll=math.atan2(
+    ay,
+    az
+    )
+
+    pitch=math.atan2(
+    -ax,
+    math.sqrt(
+    ay*ay+
+    az*az
+    )
+    )
+
+    roll=math.degrees(roll)
+    pitch=math.degrees(pitch)
+
+    return roll,pitch
+
+def calculate_heading(mx,my,mz,roll,pitch):
+
+    r=math.radians(roll)
+    p=math.radians(pitch)
+
+    xh=mx*math.cos(p)+mz*math.sin(p)
+
+    yh=mx*math.sin(r)*math.sin(p)+my*math.cos(r)-mz*math.sin(r)*math.cos(p)
+
+    heading=math.degrees(
+    math.atan2(
+    yh,
+    xh
+    )
+    )
+
+    if heading<0:
+
+        heading+=360
+
+    return heading
+
+def filter_values(roll,pitch,heading):
+
+    global first
+    global roll_f
+    global pitch_f
+    global heading_f
+
+    if first:
+
+        roll_f=roll
+        pitch_f=pitch
+        heading_f=heading
+
+        first=False
+
+    else:
+
+        roll_f=ALPHA*roll+(1-ALPHA)*roll_f
+
+        pitch_f=ALPHA*pitch+(1-ALPHA)*pitch_f
+
+        heading_f=ALPHA*heading+(1-ALPHA)*heading_f
+
+    return roll_f,pitch_f,heading_f
+
+def gravity_compensation(ax,ay,az,roll,pitch):
+
+    rr=math.radians(roll)
+    pr=math.radians(pitch)
+
+    gx=-9.81*math.sin(pr)
+
+    gy=9.81*math.sin(rr)*math.cos(pr)
+
+    gz=9.81*math.cos(rr)*math.cos(pr)
+
+    lax=ax-gx
+    lay=ay-gy
+    laz=az-gz
+
+    return lax,lay,laz
+```python id="k2m8fy"
+def estimate_motion(ax, ay, az):
+
+    global vx
+    global vy
+    global vz
+
+    global px
+    global py
+    global pz
+
+    vx = vx + (ax * DT)
+    vy = vy + (ay * DT)
+    vz = vz + (az * DT)
+
+    px = px + (vx * DT)
+    py = py + (vy * DT)
+    pz = pz + (vz * DT)
+
+    distance = math.sqrt(
+        (px * px) +
+        (py * py) +
+        (pz * pz)
+    )
+
+    return (
+        vx,
+        vy,
+        vz,
+        px,
+        py,
+        pz,
+        distance
+    )
+
+def direction(heading):
+
+    if heading >= 337.5 or heading < 22.5:
+        return "North"
+
+    elif heading < 67.5:
+        return "North-East"
+
+    elif heading < 112.5:
+        return "East"
+
+    elif heading < 157.5:
+        return "South-East"
+
+    elif heading < 202.5:
+        return "South"
+
+    elif heading < 247.5:
+        return "South-West"
+
+    elif heading < 292.5:
+        return "West"
+
+    else:
+        return "North-West"
+
+def display(
+    roll,
+    pitch,
+    heading,
+    compass,
+    vx,
+    vy,
+    vz,
+    distance
+):
+
+    print("------------------------------------------")
+
+    print(
+        "Roll      :",
+        round(roll,2),
+        "deg"
+    )
+
+    print(
+        "Pitch     :",
+        round(pitch,2),
+        "deg"
+    )
+
+    print(
+        "Heading   :",
+        round(heading,2),
+        "deg"
+    )
+
+    print(
+        "Direction :",
+        compass
+    )
+
+    print(
+        "VelocityX :",
+        round(vx,3),
+        "m/s"
+    )
+
+    print(
+        "VelocityY :",
+        round(vy,3),
+        "m/s"
+    )
+
+    print(
+        "VelocityZ :",
+        round(vz,3),
+        "m/s"
+    )
+
+    print(
+        "Estimated Distance :",
+        round(distance,3),
+        "m"
+    )
+```python id="v4n8pz"
+def main():
+
+    print("------------------------------------------")
+    print("LSM303DLHC Motion Estimation System")
+    print("------------------------------------------")
+
+    devices = i2c.scan()
+
+    print("I2C Devices :", devices)
+
+    sensor_init()
+
+    print("Sensor Initialized")
+
+    print("Calibrating...")
+
+    calibrate(300)
+
+    print("Calibration Complete")
+
+    utime.sleep_ms(1000)
+
+    while True:
+
+        try:
+
+            acc = get_acc()
+
+            mag = get_mag()
+
+            if acc is None or mag is None:
+
+                continue
+
+            ax, ay, az = acc
+
+            mx, my, mz = mag
+
+            roll, pitch = calculate_angles(
+                ax,
+                ay,
+                az
+            )
+
+            heading = calculate_heading(
+                mx,
+                my,
+                mz,
+                roll,
+                pitch
+            )
+
+            roll, pitch, heading = filter_values(
+                roll,
+                pitch,
+                heading
+            )
+
+            lax, lay, laz = gravity_compensation(
+                ax,
+                ay,
+                az,
+                roll,
+                pitch
+            )
+
+            (
+                vx,
+                vy,
+                vz,
+                px,
+                py,
+                pz,
+                distance
+            ) = estimate_motion(
+                lax,
+                lay,
+                laz
+            )
+
+            compass = direction(
+                heading
+            )
+
+            display(
+                roll,
+                pitch,
+                heading,
+                compass,
+                vx,
+                vy,
+                vz,
+                distance
+            )
+
+            utime.sleep(DT)
+
+        except KeyboardInterrupt:
+
+            print("Program Stopped")
+
+            break
+
+        except OSError:
+
+            print("I2C Error")
+
+            utime.sleep_ms(200)
+
+        except Exception as e:
+
+            print("Error :", e)
+
+            utime.sleep_ms(200)
+
+if __name__ == "__main__":
+
+    main()
+
+
