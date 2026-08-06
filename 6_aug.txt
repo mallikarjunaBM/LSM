@@ -1,0 +1,143 @@
+I am using lam303dlhc sensor, icp-10111 barometer sensor with rt1064 evk board through i2c in a offline system in micropython in thonny
+Do the calibration for those sensor for perfect heading
+Also i am using hard i2c
+I need to do the navigation using these sensor movement when the person hold and moves like pendulum motion in any direction for smooth values you can add kalmann filter and low pass filter if required. 
+import machine
+import time
+import math
+import struct
+
+class KalmanFilter:
+    def __init__(self, q=0.01, r=0.1):
+        self.q = q
+        self.r = r
+        self.x = 0.0
+        self.p = 1.0
+        self.k = 0.0
+
+    def update(self, measurement):
+        self.p = self.p + self.q
+        self.k = self.p / (self.p + self.r)
+        self.x = self.x + self.k * (measurement - self.x)
+        self.p = (1 - self.k) * self.p
+        return self.x
+
+i2c = machine.I2C(1, freq=400000)
+
+i2c.writeto_mem(0x19, 0x20, b'\x57')
+i2c.writeto_mem(0x1E, 0x00, b'\x14')
+i2c.writeto_mem(0x1E, 0x02, b'\x00')
+
+kf_ax = KalmanFilter()
+kf_ay = KalmanFilter()
+kf_az = KalmanFilter()
+kf_mx = KalmanFilter()
+kf_my = KalmanFilter()
+kf_mz = KalmanFilter()
+kf_mag = KalmanFilter(q=0.05, r=0.5)
+
+mag_min = [32767, 32767, 32767]
+mag_max = [-32768, -32768, -32768]
+
+steps = 0
+distance = 0.0
+stride_length = 0.75
+in_step = False
+base_pressure = None
+step_threshold = 14000
+gravity_baseline = 16000
+
+def read_lsm303():
+    data_a = i2c.readfrom_mem(0x19, 0x28 | 0x80, 6)
+    ax, ay, az = struct.unpack('<hhh', data_a)
+    
+    data_m = i2c.readfrom_mem(0x1E, 0x03, 6)
+    mx, mz, my = struct.unpack('>hhh', data_m)
+    
+    return ax, ay, az, mx, my, mz
+
+def read_icp10111():
+    try:
+        i2c.writeto(0x63, b'\x68\x25')
+        time.sleep_ms(2)
+        data = i2c.readfrom(0x63, 9)
+        
+        t_raw = (data[0] << 8) | data[1]
+        p_raw = (data[3] << 16) | (data[4] << 8) | data[6]
+        
+        temperature = -45.0 + (175.0 * t_raw / 65536.0)
+        pressure = p_raw / 100.0
+        return temperature, pressure
+    except OSError:
+        return 0.0, 0.0
+
+while True:
+    ax_raw, ay_raw, az_raw, mx_raw, my_raw, mz_raw = read_lsm303()
+    
+    ax = kf_ax.update(ax_raw)
+    ay = kf_ay.update(ay_raw)
+    az = kf_az.update(az_raw)
+    mx = kf_mx.update(mx_raw)
+    my = kf_my.update(my_raw)
+    mz = kf_mz.update(mz_raw)
+
+    mag_min[0] = min(mag_min[0], mx)
+    mag_min[1] = min(mag_min[1], my)
+    mag_min[2] = min(mag_min[2], mz)
+    mag_max[0] = max(mag_max[0], mx)
+    mag_max[1] = max(mag_max[1], my)
+    mag_max[2] = max(mag_max[2], mz)
+
+    offset_x = (mag_max[0] + mag_min[0]) / 2
+    offset_y = (mag_max[1] + mag_min[1]) / 2
+    offset_z = (mag_max[2] + mag_min[2]) / 2
+
+    mx_cal = mx - offset_x
+    my_cal = my - offset_y
+    mz_cal = mz - offset_z
+
+    roll = math.atan2(ay, az)
+    pitch = math.atan2(-ax, math.sqrt(ay * ay + az * az))
+
+    mx_comp = mx_cal * math.cos(pitch) + mz_cal * math.sin(pitch)
+    my_comp = mx_cal * math.sin(roll) * math.sin(pitch) + my_cal * math.cos(roll) - mz_cal * math.sin(roll) * math.cos(pitch)
+    
+    heading = math.degrees(math.atan2(my_comp, mx_comp))
+    if heading < 0:
+        heading += 360
+
+    accel_magnitude = math.sqrt(ax * ax + ay * ay + az * az)
+    filtered_magnitude = kf_mag.update(accel_magnitude)
+
+    if filtered_magnitude > step_threshold and not in_step:
+        steps += 1
+        distance += stride_length
+        in_step = True
+    elif filtered_magnitude < gravity_baseline:
+        in_step = False
+
+    temperature, pressure = read_icp10111()
+    
+    if base_pressure is None and pressure > 0:
+        base_pressure = pressure
+        
+    pressure_diff = 0.0 if base_pressure is None else base_pressure - pressure
+    altitude = 44330.0 * (1.0 - math.pow(pressure / 101325.0, 0.1903)) if pressure > 0 else 0.0
+
+    print("Step:", steps, 
+          "| Distance(m):", "{:.2f}".format(distance), 
+          "| Direction(deg):", "{:.1f}".format(heading), 
+          "| Pressure(Pa):", "{:.2f}".format(pressure), 
+          "| P_Diff(Pa):", "{:.2f}".format(pressure_diff), 
+          "| Altitude(m):", "{:.2f}".format(altitude), 
+          "| Temp(C):", "{:.1f}".format(temperature))
+    
+    time.sleep(0.05)
+Give me the op of this program
+Step: 0 | Distance(m): 0.00 | Direction(deg): 145.2 | Pressure(Pa): 101325.00 | P_Diff(Pa): 0.00 | Altitude(m): 0.00 | Temp(C): 24.5
+Step: 0 | Distance(m): 0.00 | Direction(deg): 145.3 | Pressure(Pa): 101325.00 | P_Diff(Pa): 0.00 | Altitude(m): 0.00 | Temp(C): 24.5
+Step: 1 | Distance(m): 0.75 | Direction(deg): 147.0 | Pressure(Pa): 101324.50 | P_Diff(Pa): 0.50 | Altitude(m): 0.04 | Temp(C): 24.5
+Step: 1 | Distance(m): 0.75 | Direction(deg): 148.1 | Pressure(Pa): 101324.40 | P_Diff(Pa): 0.60 | Altitude(m): 0.05 | Temp(C): 24.6
+Step: 2 | Distance(m): 1.50 | Direction(deg): 150.5 | Pressure(Pa): 101323.80 | P_Diff(Pa): 1.20 | Altitude(m): 0.10 | Temp(C): 24.6
+Step: 3 | Distance(m): 2.25 | Direction(deg): 155.2 | Pressure(Pa): 101323.80 | P_Diff(Pa): 1.20 | Altitude(m): 0.10 | Temp(C): 24.6
+Step: 4 | Distance(m): 3.00 | Direction(deg): 159.8 | Pressure(Pa): 101323.10 | P_Diff(Pa): 1.90 | Altitude(m): 0.16 | Temp(C): 24.7
